@@ -101,7 +101,7 @@ export interface RailwayDeployParams {
 }
 
 export type RailwayProgressFn = (step: number, total: number, label: string) => void;
-export const RAILWAY_DEPLOY_STEPS = 6;
+export const RAILWAY_DEPLOY_STEPS = 7;
 
 // ── deploy ────────────────────────────────────────────────────────────────────
 
@@ -131,6 +131,9 @@ export async function deployToRailway(
       "utf8"
     );
 
+    // NOTE: `region` is NOT supported in railway.json (only multiRegionConfig is).
+    // Region must be set via GraphQL serviceInstanceUpdate AFTER deploy.
+    // See: https://docs.railway.com/guides/manage-services
     const railwayCfg: Record<string, unknown> = {
       $schema: "https://schema.railway.app/railway.schema.json",
       build: { builder: "NIXPACKS" },
@@ -138,7 +141,6 @@ export async function deployToRailway(
         startCommand: "node src/index.js",
         restartPolicyType: "ON_FAILURE",
         restartPolicyMaxRetries: 10,
-        ...(params.region ? { region: params.region } : {}),
       },
     };
     writeFileSync(resolve(tmpDir, "railway.json"), JSON.stringify(railwayCfg, null, 2), "utf8");
@@ -190,9 +192,64 @@ export async function deployToRailway(
     emit(3, "Uploading & building code (1-2 min)...");
     runRailway(["up", "--detach"], tmpDir, params.apiToken);
 
+    // ── Step 3b: Set region via GraphQL (railway.json does NOT support region) ─
+    // Must be done after `railway up` so the service + environment IDs exist.
+    if (params.region) {
+      try {
+        // Get project ID from the local .railway/config.toml written by CLI
+        let gqlProjectId = "";
+        try {
+          const cfgRaw = readFileSync(resolve(tmpDir, ".railway", "config.toml"), "utf8");
+          const m = cfgRaw.match(/project\s*=\s*"([0-9a-f-]{36})"/i);
+          if (m) gqlProjectId = m[1];
+        } catch {}
+
+        if (gqlProjectId) {
+          // Fetch serviceId and environmentId for this project
+          const projData = await gql<{
+            project: {
+              services: { edges: Array<{ node: { id: string } }> };
+              environments: { edges: Array<{ node: { id: string; name: string } }> };
+            };
+          }>(
+            params.apiToken,
+            `query ($id: String!) {
+              project(id: $id) {
+                services { edges { node { id } } }
+                environments { edges { node { id name } } }
+              }
+            }`,
+            { id: gqlProjectId }
+          );
+
+          const serviceId = projData.project?.services?.edges?.[0]?.node?.id;
+          const envEdge = projData.project?.environments?.edges?.find(
+            (e) => e.node.name === "production"
+          ) ?? projData.project?.environments?.edges?.[0];
+          const environmentId = envEdge?.node?.id;
+
+          if (serviceId && environmentId) {
+            await gql(
+              params.apiToken,
+              `mutation ($serviceId: String!, $environmentId: String!, $input: ServiceInstanceUpdateInput!) {
+                serviceInstanceUpdate(serviceId: $serviceId, environmentId: $environmentId, input: $input)
+              }`,
+              { serviceId, environmentId, input: { region: params.region } }
+            );
+            emit(3, `Region set to ${params.region} — redeploying...`);
+            // Trigger a new deployment so the region change takes effect
+            runRailway(["up", "--detach"], tmpDir, params.apiToken);
+          }
+        }
+      } catch (regionErr: any) {
+        // Non-fatal — deployment still works, just in default region
+        console.warn("[Railway] Could not set region via GraphQL:", regionErr.message);
+      }
+    }
+
     // ── Step 4: Set environment variables ────────────────────────────────────
     const targetUrl = `https://${params.targetDomain.includes(":") ? params.targetDomain : params.targetDomain + ":" + (params.targetPort || 443)}`;
-    emit(4, `Setting env vars (TARGET=${targetUrl})...`);
+    emit(4, `Setting environment variables (TARGET=${targetUrl})...`);
     const setArgs: string[] = ["variables"];
     const kvPairs: string[] = [
       `TARGET_DOMAIN=${targetUrl}`,
@@ -210,6 +267,7 @@ export async function deployToRailway(
 
     // ── Step 5: Generate domain ──────────────────────────────────────────────
     emit(5, "Generating public domain...");
+
     let url = "";
     try {
       const domainOut = runRailway(["domain"], tmpDir, params.apiToken);
@@ -219,7 +277,7 @@ export async function deployToRailway(
     if (!url) url = `https://${params.projectName}.up.railway.app`;
 
     // ── Step 6: Capture project ID ───────────────────────────────────────────
-    emit(6, `Railway service live: ${url}`);
+    emit(7, `Railway service live: ${url}`);
     let projectId: string = params.projectName;
     try {
       const cfgContent = readFileSync(resolve(tmpDir, ".railway", "config.toml"), "utf8");
