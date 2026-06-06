@@ -61,6 +61,66 @@ do_reset_password() {
     || die "Failed: $RES"
 }
 
+do_update() {
+  echo -e "${C}Updating XHTTP Panel...${N}"
+  echo ""
+
+  local REPO="avacocloud/XHTTP-Panel"
+  local INSTALL_DIR="/root/xhttp-panel"
+  local TARBALL="xhttp-panel-release.tar.gz"
+
+  # Download latest release
+  local RELEASE_URL
+  RELEASE_URL=$(curl -fsSL "https://api.github.com/repos/${REPO}/releases/latest" 2>/dev/null | \
+    grep -oP '"browser_download_url":\s*"\K[^"]+xhttp-panel-release\.tar\.gz' | head -1 || true)
+
+  if [[ -z "$RELEASE_URL" ]]; then
+    die "No release found on GitHub. Check: https://github.com/${REPO}/releases"
+  fi
+
+  # Backup data
+  echo -e "${Y}Backing up data...${N}"
+  [[ -d "$INSTALL_DIR/dist/data" ]] && cp -r "$INSTALL_DIR/dist/data" /tmp/xhttp-panel-data-backup 2>/dev/null || true
+
+  # Download
+  echo -e "${C}Downloading latest release...${N}"
+  curl -fsSL "$RELEASE_URL" -o "/tmp/$TARBALL" || die "Download failed"
+  echo -e "${G}✓ Downloaded${N}"
+
+  # Extract
+  rm -rf "$INSTALL_DIR/dist"
+  tar -xzf "/tmp/$TARBALL" -C "$INSTALL_DIR"
+  rm -f "/tmp/$TARBALL"
+  echo -e "${G}✓ Files updated${N}"
+
+  # Restore data
+  if [[ -d /tmp/xhttp-panel-data-backup ]]; then
+    mkdir -p "$INSTALL_DIR/dist/data"
+    cp -r /tmp/xhttp-panel-data-backup/. "$INSTALL_DIR/dist/data/"
+    rm -rf /tmp/xhttp-panel-data-backup
+    echo -e "${G}✓ Data restored${N}"
+  fi
+
+  # Update CLI
+  local SELF_URL="https://raw.githubusercontent.com/${REPO}/main/xhttp-info.sh"
+  curl -fsSL "$SELF_URL" -o /usr/local/bin/xhttp-info 2>/dev/null && \
+    chmod +x /usr/local/bin/xhttp-info && \
+    echo -e "${G}✓ CLI updated${N}" || true
+
+  # Dependencies
+  cd "$INSTALL_DIR"
+  npm install --omit=dev --silent 2>/dev/null
+  echo -e "${G}✓ Dependencies OK${N}"
+
+  # Restart
+  pm2 restart xhttp-panel --update-env >/dev/null 2>&1 && \
+    echo -e "${G}✓ Panel restarted${N}" || \
+    echo -e "${Y}⚠ Could not restart — run: pm2 restart xhttp-panel${N}"
+
+  echo ""
+  echo -e "${G}✔ Update complete!${N}"
+}
+
 do_set_path() {
   echo -e "${Y}New web path (4–32 chars, a-z 0-9 _ -)${N}"
   read -rp "> " NEW_PATH
@@ -85,6 +145,7 @@ main_menu() {
   show_header
   echo -e "  ${W}[1]${N} Reset admin password"
   echo -e "  ${W}[2]${N} Change web path"
+  echo -e "  ${W}[3]${N} Update panel"
   echo -e "  ${W}[q]${N} Quit"
   echo ""
   read -rp "Choice: " CHOICE
@@ -92,6 +153,7 @@ main_menu() {
   case "$CHOICE" in
     1) do_reset_password ;;
     2) do_set_path ;;
+    3) do_update ;;
     q|Q) exit 0 ;;
     *) echo -e "${R}Invalid choice${N}" ;;
   esac
@@ -104,6 +166,7 @@ check_panel
 case "${1:-}" in
   reset-password) do_reset_password ;;
   set-path)       do_set_path ;;
+  update)         do_update ;;
   info)           show_header ;;
   *)              main_menu ;;
 esac
