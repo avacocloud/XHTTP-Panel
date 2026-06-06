@@ -341,11 +341,17 @@ router.post("/phase3/issue-cert", requireAuth, (req, res) => {
 
   // Use child_process.exec (async, non-blocking) so Node.js can still serve poll requests
   // IMPORTANT: use ; (not &&) so nginx ALWAYS restarts even if acme.sh fails
+  // Clear stale ZeroSSL CA cache, force Let's Encrypt, and listen on IPv4 only
+  // (same fixes as Deploy-Ubuntu.sh v1.0.3)
   const script = `
-    systemctl stop nginx 2>/dev/null; fuser -k 80/tcp 2>/dev/null; sleep 1;
-    /root/.acme.sh/acme.sh --issue -d ${safeDomain} --standalone --keylength ec-256 --force 2>&1;
+    systemctl stop nginx 2>/dev/null; systemctl stop xray 2>/dev/null; fuser -k 80/tcp 2>/dev/null; sleep 1;
+    rm -rf /root/.acme.sh/ca 2>/dev/null;
+    rm -f /root/.acme.sh/account.conf 2>/dev/null;
+    /root/.acme.sh/acme.sh --set-default-ca --server letsencrypt 2>&1;
+    /root/.acme.sh/acme.sh --register-account -m admin@${safeDomain} --server letsencrypt 2>&1;
+    /root/.acme.sh/acme.sh --issue -d ${safeDomain} --standalone --keylength ec-256 --listen-v4 --server letsencrypt --force 2>&1;
     ACME_EXIT=$?;
-    systemctl start nginx 2>/dev/null;
+    systemctl start nginx 2>/dev/null; systemctl start xray 2>/dev/null;
     exit $ACME_EXIT
   `;
 
