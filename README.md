@@ -45,6 +45,23 @@ bash <(curl -fsSL https://raw.githubusercontent.com/avacocloud/XHTTP-Panel/main/
 
 ---
 
+## آپدیت
+
+### اگه با `install.sh` نصب کردی:
+```bash
+cd /root/xhttp-panel && bash update.sh
+```
+
+### اگه با `xhttp-info` (نسخه قدیمی) نصب کردی:
+```bash
+cd /root
+rm -rf xhttp-panel
+bash <(curl -fsSL https://raw.githubusercontent.com/avacocloud/XHTTP-Panel/main/install.sh)
+```
+دیتابیس و تنظیمات از نسخه قدیمی منتقل نمیشه — توکن‌ها رو دوباره وارد کنید.
+
+---
+
 ## چیه این؟
 
 XHTTP Panel یه **داشبورد وب self-hosted** هست که جایگزین کار دستی با CLI برای دیپلوی و مدیریت سرورهای ریلی VLESS+XHTTP میشه. به جای SSH زدن و اجرای دستورات، یه UI تمیز داری با دیپلوی یک‌کلیکی، پراگرس زنده، و مدیریت کامل.
