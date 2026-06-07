@@ -117,8 +117,12 @@ do_update() {
 
   # Dependencies
   cd "$INSTALL_DIR"
-  npm install --omit=dev --silent 2>/dev/null
-  echo -e "${G}✓ Dependencies OK${N}"
+  if npm install --omit=dev --silent 2>/dev/null; then
+    echo -e "${G}✓ Dependencies OK${N}"
+  else
+    npm install --omit=dev 2>&1 || echo -e "${Y}⚠ npm install had issues${N}"
+    echo -e "${G}✓ Dependencies OK${N}"
+  fi
 
   # Restart
   pm2 restart xhttp-panel --update-env >/dev/null 2>&1 && \

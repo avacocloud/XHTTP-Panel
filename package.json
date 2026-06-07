@@ -5,7 +5,7 @@
   "private": true,
   "scripts": {
     "dev": "tsx watch server/index.ts",
-    "build": "tsc && cp -r server/resources dist/server/ && mkdir -p dist/frontend && cp -r frontend/out dist/frontend/ && cp -r ../deploy dist/deploy",
+    "build": "tsc && cp -r server/resources dist/server/ && mkdir -p dist/frontend && cp -r frontend/out dist/frontend/ && cp -r ../deploy dist/deploy && find dist -xattrname com.apple.provenance -exec xattr -d com.apple.provenance {} \\; 2>/dev/null; true",
     "start": "node dist/server/index.js"
   },
   "dependencies": {

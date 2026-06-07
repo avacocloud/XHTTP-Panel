@@ -123,8 +123,13 @@ fi
 # ── 6. npm install (production only) ─────────────────────────
 info "Installing npm dependencies..."
 cd "$INSTALL_DIR"
-npm install --omit=dev --silent
-ok "Dependencies installed"
+if npm install --omit=dev --silent 2>&1; then
+  ok "Dependencies installed"
+else
+  warn "npm install had warnings — retrying without --silent..."
+  npm install --omit=dev 2>&1 || die "npm install failed"
+  ok "Dependencies installed (with warnings)"
+fi
 
 # ── 7. PM2 start/restart ─────────────────────────────────────
 info "Starting panel with PM2..."
