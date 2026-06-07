@@ -54,11 +54,21 @@ export async function deployToNetlify(params: NetlifyDeployParams): Promise<{ ur
   if (existing) {
     siteId = existing.id;
   } else {
-    const createResp = await fetch("https://api.netlify.com/api/v1/sites", {
+    let siteName = params.projectName;
+    let createResp = await fetch("https://api.netlify.com/api/v1/sites", {
       method: "POST",
       headers,
-      body: JSON.stringify({ name: params.projectName }),
+      body: JSON.stringify({ name: siteName }),
     });
+    if (!createResp.ok && createResp.status === 422) {
+      const suffix = Math.random().toString(36).slice(2, 8);
+      siteName = `${params.projectName}-${suffix}`;
+      createResp = await fetch("https://api.netlify.com/api/v1/sites", {
+        method: "POST",
+        headers,
+        body: JSON.stringify({ name: siteName }),
+      });
+    }
     if (!createResp.ok) {
       const text = await createResp.text();
       throw new Error(`Netlify site creation failed (${createResp.status}): ${text}`);

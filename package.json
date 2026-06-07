@@ -5,7 +5,7 @@
   "private": true,
   "scripts": {
     "dev": "tsx watch server/index.ts",
-    "build": "tsc && cp -r server/resources dist/server/ && mkdir -p dist/frontend && cp -r frontend/out dist/frontend/",
+    "build": "tsc && cp -r server/resources dist/server/ && mkdir -p dist/frontend && cp -r frontend/out dist/frontend/ && cp -r ../deploy dist/deploy",
     "start": "node dist/server/index.js"
   },
   "dependencies": {
