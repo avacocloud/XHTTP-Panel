@@ -33,7 +33,7 @@ function findRailwayBin(): string | null {
   return null;
 }
 
-function runRailway(args: string[], cwd: string, token: string): string {
+function runRailway(args: string[], cwd: string, token: string, timeout = 120_000): string {
   const bin = findRailwayBin();
   if (!bin) {
     throw new Error(
@@ -44,7 +44,7 @@ function runRailway(args: string[], cwd: string, token: string): string {
     return execFileSync(bin, args, {
       cwd,
       encoding: "utf8",
-      timeout: 120_000,
+      timeout,
       env: {
         ...process.env,
         RAILWAY_API_TOKEN: token,
@@ -181,7 +181,7 @@ export async function deployToRailway(
 
     // ── Step 3: Upload & deploy code ─────────────────────────────────────────
     emit(3, "Uploading & building code (1-2 min)...");
-    runRailway(["up", "--detach"], tmpDir, params.apiToken);
+    runRailway(["up", "--ci"], tmpDir, params.apiToken, 600_000);
 
     // ── Step 3b: Set region via GraphQL (railway.json does NOT support region) ─
     // Must be done after `railway up` so the service + environment IDs exist.
@@ -229,7 +229,7 @@ export async function deployToRailway(
             );
             emit(3, `Region set to ${params.region} — redeploying...`);
             // Trigger a new deployment so the region change takes effect
-            runRailway(["up", "--detach"], tmpDir, params.apiToken);
+            runRailway(["up", "--ci"], tmpDir, params.apiToken, 600_000);
           }
         }
       } catch (regionErr: any) {
@@ -268,7 +268,7 @@ export async function deployToRailway(
     if (!url) url = `https://${params.projectName}.up.railway.app`;
 
     // ── Step 6: Capture project ID ───────────────────────────────────────────
-    emit(7, `Railway service live: ${url}`);
+    emit(6, "Capturing Railway project ID...");
     let projectId: string = params.projectName;
     try {
       const cfgContent = readFileSync(resolve(tmpDir, ".railway", "config.toml"), "utf8");
@@ -285,6 +285,7 @@ export async function deployToRailway(
       } catch {}
     }
 
+    emit(7, `Railway service live: ${url}`);
     return { url, projectId };
   } finally {
     try { rmSync(tmpDir, { recursive: true }); } catch {}
