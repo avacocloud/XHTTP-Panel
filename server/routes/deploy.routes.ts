@@ -2,6 +2,7 @@ import { Router } from "express";
 import { getDb } from "../db/init.js";
 import { requireAuth } from "../middleware/auth.js";
 import { verifyAccessToken } from "../utils/jwt.js";
+import { getSessionVersion } from "../utils/session.js";
 import { decrypt } from "../services/crypto.service.js";
 import { deployToVercel, deleteVercelProject } from "../services/vercel.service.js";
 import { deployToNetlify, deleteNetlifySite } from "../services/netlify.service.js";
@@ -45,9 +46,13 @@ function emitProgress(id: number, event: DeployProgressEvent) {
 
 // SSE endpoint — token passed as query param because EventSource can't set headers
 router.get("/:id/stream", (req, res) => {
-  const token = req.query.token as string;
+  const token = typeof req.query.token === "string" ? req.query.token : "";
   try {
-    verifyAccessToken(token);
+    const payload = verifyAccessToken(token);
+    if (payload.sv !== getSessionVersion()) {
+      res.status(401).end();
+      return;
+    }
   } catch {
     res.status(401).end();
     return;

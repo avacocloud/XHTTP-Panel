@@ -6,12 +6,16 @@ import { readFileSync, statfsSync } from "node:fs";
 
 const router = Router();
 
+const HIDDEN_SETTINGS = new Set(["panel_secret", "session_version", "legacy_admin_rotated"]);
+const WRITABLE_SETTINGS = new Set(["language", "theme"]);
+
 router.get("/", requireAuth, (_req, res) => {
   const db = getDb();
   const rows = db.prepare("SELECT key, value FROM settings").all() as Array<{ key: string; value: string }>;
 
   const settings: Record<string, string> = {};
   for (const row of rows) {
+    if (HIDDEN_SETTINGS.has(row.key) || row.key.includes("secret")) continue;
     settings[row.key] = row.value;
   }
   res.json(settings);
@@ -30,13 +34,21 @@ router.put("/", requireAuth, (req, res) => {
     "INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value"
   );
 
+  let updated = 0;
   const transaction = db.transaction(() => {
     for (const [key, value] of Object.entries(entries)) {
-      upsert.run(key, String(value));
+      if (!WRITABLE_SETTINGS.has(key)) continue;
+      if (typeof value !== "string" || value.length > 32) continue;
+      upsert.run(key, value);
+      updated += 1;
     }
   });
 
   transaction();
+  if (updated === 0) {
+    res.status(400).json({ error: "No allowed settings" });
+    return;
+  }
   res.json({ message: "Settings updated" });
 });
 

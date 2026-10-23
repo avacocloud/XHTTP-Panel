@@ -1,5 +1,5 @@
 import { readFileSync, existsSync, writeFileSync, copyFileSync } from "node:fs";
-import { execSync } from "node:child_process";
+import { execSync, spawnSync } from "node:child_process";
 
 const INSTALLER_ENV = process.env.INSTALLER_ENV_PATH || "/etc/xhttp-installer/info.env";
 const XRAY_CONFIG = process.env.XRAY_CONFIG_PATH || "/usr/local/etc/xray/config.json";
@@ -149,14 +149,20 @@ export function getServerStatus(): ServerStatus {
   }
 
   let sslExpiry: string | null = null;
-  if (state.domain) {
+  if (state.domain && /^[A-Za-z0-9._-]+$/.test(state.domain) && !state.domain.startsWith("-") && !state.domain.includes("..")) {
     try {
-      const output = execSync(
-        `echo | openssl s_client -connect ${state.domain}:443 -servername ${state.domain} 2>/dev/null | openssl x509 -noout -enddate 2>/dev/null`,
-        { encoding: "utf-8" }
-      ).trim();
-      const match = output.match(/notAfter=(.+)/);
-      if (match) sslExpiry = match[1];
+      const client = spawnSync(
+        "openssl",
+        ["s_client", "-connect", `${state.domain}:443`, "-servername", state.domain],
+        { input: "\n", encoding: "utf-8", timeout: 15000 }
+      );
+      const parsed = spawnSync("openssl", ["x509", "-noout", "-enddate"], {
+        input: client.stdout || "",
+        encoding: "utf-8",
+        timeout: 5000,
+      });
+      const match = (parsed.stdout || "").match(/notAfter=(.+)/);
+      if (match) sslExpiry = match[1].trim();
     } catch {}
   }
 
@@ -207,14 +213,17 @@ function writeConfigAndRestart(config: Record<string, any>): { success: boolean;
   writeFileSync(XRAY_CONFIG, JSON.stringify(config, null, 2), "utf-8");
 
   // Validate config with xray test
-  try {
-    execSync(`xray -test -config "${XRAY_CONFIG}" 2>&1`, { encoding: "utf-8", timeout: 10000, cwd: "/root" });
-  } catch (err: any) {
-    // Config invalid — restore backup
+  const test = spawnSync("xray", ["-test", "-config", XRAY_CONFIG], {
+    encoding: "utf-8",
+    timeout: 10000,
+    cwd: "/root",
+  });
+  if (test.status !== 0) {
     if (existsSync(XRAY_CONFIG + ".bak")) {
       copyFileSync(XRAY_CONFIG + ".bak", XRAY_CONFIG);
     }
-    return { success: false, message: "Invalid config: " + (err.stderr || err.stdout || String(err)).slice(0, 300) };
+    const detail = test.stderr || test.stdout || test.error?.message || "xray test failed";
+    return { success: false, message: "Invalid config: " + String(detail).slice(0, 300) };
   }
 
   return restartXray();

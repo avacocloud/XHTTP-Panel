@@ -1,14 +1,16 @@
 import "dotenv/config";
 import express from "express";
 import cors from "cors";
-import { resolve, dirname, join } from "node:path";
+import { resolve, dirname, join, sep } from "node:path";
 import { fileURLToPath } from "node:url";
-import { existsSync, mkdirSync } from "node:fs";
+import { existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { randomBytes } from "node:crypto";
 import { networkInterfaces } from "node:os";
 import bcrypt from "bcrypt";
 
 import { getDb, closeDb } from "./db/init.js";
+import { dataDir } from "./utils/paths.js";
+import { bumpSessionVersion } from "./utils/session.js";
 import { readInstallerState } from "./services/xray.service.js";
 import authRoutes from "./routes/auth.routes.js";
 import dashboardRoutes from "./routes/dashboard.routes.js";
@@ -25,8 +27,12 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 const PORT = Number(process.env.PORT) || 3000;
 
 const app = express();
-app.use(cors());
-app.use(express.json());
+app.disable("x-powered-by");
+const corsOrigin = process.env.CORS_ORIGIN?.trim();
+if (corsOrigin) {
+  app.use(cors({ origin: corsOrigin, credentials: true }));
+}
+app.use(express.json({ limit: "1mb" }));
 
 const frontendPath = resolve(__dirname, "../frontend/out");
 
@@ -62,17 +68,35 @@ function upsertSetting(key: string, value: string) {
 // ── Bootstrap ─────────────────────────────────────────────────────────────────
 
 function bootstrap() {
-  const dataDir = resolve(__dirname, "../data");
-  if (!existsSync(dataDir)) mkdirSync(dataDir, { recursive: true });
+  const bootData = dataDir();
+  if (!existsSync(bootData)) mkdirSync(bootData, { recursive: true });
 
   const db = getDb();
 
-  // Seed admin
-  if (!db.prepare("SELECT id FROM admin LIMIT 1").get()) {
-    const hash = bcrypt.hashSync("admin", 10);
+  const adminRow = db.prepare("SELECT id, password FROM admin LIMIT 1").get() as
+    | { id: number; password: string }
+    | undefined;
+  const passwordFile = join(dataDir(), "initial-admin-password");
+  const rotated = db.prepare("SELECT value FROM settings WHERE key = 'legacy_admin_rotated'").get();
+
+  if (!adminRow) {
+    const password = randomBytes(18).toString("base64url");
+    const hash = bcrypt.hashSync(password, 10);
     db.prepare("INSERT INTO admin (username, password) VALUES (?, ?)").run("admin", hash);
-    console.log("Default admin created — username: admin, password: admin");
-    console.log("IMPORTANT: Change the default password after first login!");
+    mkdirSync(dataDir(), { recursive: true });
+    writeFileSync(passwordFile, password + "\n", { mode: 0o600 });
+    console.log("Admin user created. Initial password file:", passwordFile);
+  } else if (!rotated) {
+    let isDefault = false;
+    try { isDefault = bcrypt.compareSync("admin", adminRow.password); } catch { isDefault = false; }
+    if (isDefault) {
+      const password = randomBytes(18).toString("base64url");
+      const hash = bcrypt.hashSync(password, 10);
+      db.prepare("UPDATE admin SET password = ? WHERE id = ?").run(hash, adminRow.id);
+      mkdirSync(dataDir(), { recursive: true });
+      writeFileSync(passwordFile, password + "\n", { mode: 0o600 });
+      console.log("Default admin/admin password replaced. Initial password file:", passwordFile);
+    }
   }
 
   // Seed settings — DO NOTHING if key already exists (preserve existing values)
@@ -83,6 +107,8 @@ function bootstrap() {
   seed.run("theme",        "light");
   seed.run("web_path",     randomBytes(5).toString("hex"));   // e.g. a3f9c1d2e4
   seed.run("panel_secret", randomBytes(32).toString("hex"));  // httpOnly cookie value
+  seed.run("session_version", "1");
+  seed.run("legacy_admin_rotated", "1");
 }
 
 bootstrap();
@@ -94,10 +120,23 @@ const COOKIE_TTL_MS = 7 * 24 * 60 * 60 * 1000; // 7 days
 
 // ── Guards ────────────────────────────────────────────────────────────────────
 
+function isLoopback(ip: string): boolean {
+  return ip === "127.0.0.1" || ip === "::1" || ip === "::ffff:127.0.0.1";
+}
+
 function localOnly(req: express.Request, res: express.Response, next: express.NextFunction) {
   const ip = req.socket.remoteAddress ?? "";
-  if (ip === "127.0.0.1" || ip === "::1" || ip === "::ffff:127.0.0.1") return next();
+  // A reverse proxy always sits on loopback and sets these headers.
+  // Direct CLI calls (xhttp-info) do not, so proxied requests stay rejected.
+  const viaProxy = Boolean(req.headers["x-forwarded-for"] || req.headers["x-real-ip"]);
+  if (isLoopback(ip) && !viaProxy) return next();
   res.status(404).json({ error: "Not found" });
+}
+
+function isInside(root: string, file: string): boolean {
+  const base = resolve(root);
+  const target = resolve(file);
+  return target === base || target.startsWith(base + sep);
 }
 
 function requirePanelCookie(req: express.Request, res: express.Response, next: express.NextFunction) {
@@ -136,6 +175,7 @@ app.post("/api/v1/local/reset-password", localOnly, async (req, res) => {
   }
   const hash = await bcrypt.hash(password, 10);
   getDb().prepare("UPDATE admin SET password = ? WHERE username = 'admin'").run(hash);
+  bumpSessionVersion();
   res.json({ ok: true });
 });
 
@@ -149,6 +189,8 @@ app.post("/api/v1/local/set-web-path", localOnly, (req, res) => {
 });
 
 // ── API routes ────────────────────────────────────────────────────────────────
+// Local routes above are registered first and never reach this gate.
+app.use("/api", requirePanelCookie);
 
 app.use("/api/v1/auth",      authRoutes);
 app.use("/api/v1/dashboard", dashboardRoutes);
@@ -182,10 +224,15 @@ if (existsSync(frontendPath)) {
 
 // ── Secret gate — visiting /{WEB_PATH} sets the access cookie ─────────────────
 
-app.get(`/${WEB_PATH}`, (_req, res) => {
+app.get(`/${WEB_PATH}`, (req, res) => {
+  const proto = req.get("x-forwarded-proto")?.split(",")[0]?.trim();
+  const secure = process.env.COOKIE_SECURE === "0"
+    ? false
+    : process.env.COOKIE_SECURE === "1" || proto === "https";
   res
     .cookie(COOKIE_NAME, PANEL_SECRET, {
       httpOnly: true,
+      secure,
       maxAge:   COOKIE_TTL_MS,
       sameSite: "strict",
       path:     "/",
@@ -202,13 +249,14 @@ app.get("*", requirePanelCookie, (req, res) => {
 
   // Map URL → Next.js static export file
   const urlPath = req.path.replace(/\/+$/, "") || "";
+  if (urlPath.includes("..")) return res.status(404).send("Not found");
   const candidates = [
     join(frontendPath, urlPath, "index.html"),
     join(frontendPath, urlPath + ".html"),
     join(frontendPath, "index.html"),
   ];
   for (const f of candidates) {
-    if (existsSync(f)) return res.sendFile(f);
+    if (isInside(frontendPath, f) && existsSync(f)) return res.sendFile(f);
   }
   res.sendFile(join(frontendPath, "index.html"));
 });
@@ -222,8 +270,9 @@ app.use((err: Error, _req: express.Request, res: express.Response, _next: expres
 
 // ── Start ─────────────────────────────────────────────────────────────────────
 
-const server = app.listen(PORT, () => {
-  console.log(`XHTTP Panel running at http://localhost:${PORT}`);
+const HOST = process.env.HOST || "127.0.0.1";
+const server = app.listen(PORT, HOST, () => {
+  console.log(`XHTTP Panel running at http://${HOST}:${PORT}`);
   console.log(`Panel path: /${WEB_PATH}  (run 'xhttp-info' to manage)`);
 });
 

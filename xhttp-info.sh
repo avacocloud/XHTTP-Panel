@@ -5,7 +5,12 @@
 # ─────────────────────────────────────────────
 
 PORT="${PANEL_PORT:-3000}"
-BASE="http://127.0.0.1:$PORT/api/v1/local"
+BASE=""
+API_OK=0
+WEB_PATH=""
+PANEL_URL=""
+LOCAL_URL=""
+LOGIN_LINE=""
 
 # ANSI colors
 R='\033[0;31m' G='\033[0;32m' Y='\033[0;33m'
@@ -15,38 +20,147 @@ B='\033[0;34m' C='\033[0;36m' W='\033[1;37m' N='\033[0m'
 
 die() { echo -e "${R}✗ $*${N}" >&2; exit 1; }
 
+pm2_out_log() {
+  local f
+  for f in \
+    "${PM2_HOME:-}/logs/xhttp-panel-out.log" \
+    /root/.pm2/logs/xhttp-panel-out.log \
+    "${HOME}/.pm2/logs/xhttp-panel-out.log"
+  do
+    [[ -n "$f" && -f "$f" ]] && { echo "$f"; return 0; }
+  done
+  return 1
+}
+
+read_panel_log() {
+  local log
+  if log=$(pm2_out_log); then
+    tail -n 400 "$log" 2>/dev/null || true
+    return 0
+  fi
+  if command -v pm2 >/dev/null 2>&1; then
+    pm2 logs xhttp-panel --nostream --lines 200 --raw 2>/dev/null || \
+      pm2 log xhttp-panel --nostream --lines 200 --raw 2>/dev/null || true
+  fi
+}
+
+apply_log_info() {
+  local text="$1"
+  [[ -n "$text" ]] || return 0
+  local path url
+  path=$(printf '%s\n' "$text" | sed -n 's/.*Panel path: \/\([A-Za-z0-9_-][A-Za-z0-9_-]*\).*/\1/p' | tail -n 1)
+  url=$(printf '%s\n' "$text" | sed -n 's/.*XHTTP Panel running at \(http[^[:space:]]*\).*/\1/p' | tail -n 1)
+  [[ -n "$path" ]] && WEB_PATH="$path"
+  [[ -n "$url" ]] && LOCAL_URL="$url"
+  if printf '%s\n' "$text" | grep -q 'Default admin created'; then
+    LOGIN_LINE="admin / admin"
+  fi
+  local port
+  port=$(printf '%s\n' "$LOCAL_URL" | sed -n 's#.*:\([0-9][0-9]*\).*#\1#p' | tail -n 1)
+  [[ -n "$port" ]] && PORT="$port"
+}
+
+json_string() {
+  local s=$1
+  s=${s//\\/\\\\}
+  s=${s//\"/\\\"}
+  s=${s//$'\n'/\\n}
+  s=${s//$'\r'/\\r}
+  printf '"%s"' "$s"
+}
+
+load_password_file() {
+  local f
+  for f in \
+    /root/xhttp-panel/dist/data/initial-admin-password \
+    /root/xhttp-panel/data/initial-admin-password
+  do
+    if [[ -f "$f" ]]; then
+      LOGIN_LINE="admin / $(tr -d '\r\n' < "$f")"
+      return 0
+    fi
+  done
+  return 1
+}
+
+pick_base() {
+  local c
+  for c in \
+    "http://127.0.0.1:${PORT}/api/v1/local" \
+    "http://[::1]:${PORT}/api/v1/local"
+  do
+    if command -v curl >/dev/null 2>&1 && curl -sf --max-time 3 "$c/info" -o /dev/null; then
+      BASE="$c"
+      API_OK=1
+      return 0
+    fi
+  done
+  return 1
+}
+
 check_panel() {
-  curl -sf "$BASE/info" -o /dev/null 2>/dev/null || \
-    die "Panel is not running. Start it with: pm2 start xhttp-panel"
+  local text
+  text=$(read_panel_log || true)
+  apply_log_info "$text"
+  load_password_file || true
+  if ! command -v curl >/dev/null 2>&1; then
+    echo -e "${Y}curl is not installed, so the local API was not queried. apt-get install -y curl${N}" >&2
+    return 0
+  fi
+  pick_base || true
 }
 
 get_info() {
-  curl -sf "$BASE/info" 2>/dev/null
+  [[ "$API_OK" -eq 1 ]] || return 1
+  curl -sf --max-time 3 "$BASE/info" 2>/dev/null
 }
 
-parse() { echo "$1" | grep -o "\"$2\":\"[^\"]*\"" | cut -d'"' -f4; }
+parse() { printf '%s\n' "$1" | sed -n "s/.*\"$2\":\"\\([^\"]*\\)\".*/\\1/p" | head -n 1; }
 
 # ── screens ──────────────────────────────────
 
 show_header() {
-  local INFO; INFO=$(get_info)
-  local WEB_PATH PANEL_URL LOCAL_URL
-  WEB_PATH=$(parse "$INFO" webPath)
-  PANEL_URL=$(parse "$INFO" panelUrl)
-  LOCAL_URL=$(parse "$INFO" localUrl)
+  local INFO=""
+  if [[ "$API_OK" -eq 1 ]]; then
+    INFO=$(get_info || true)
+    local path url local_url
+    path=$(parse "$INFO" webPath)
+    url=$(parse "$INFO" panelUrl)
+    local_url=$(parse "$INFO" localUrl)
+    [[ -n "$path" ]] && WEB_PATH="$path"
+    [[ -n "$url" ]] && PANEL_URL="$url"
+    [[ -n "$local_url" ]] && LOCAL_URL="$local_url"
+  fi
 
   echo ""
-  echo -e "${W}╔══════════════════════════════════════════════╗${N}"
-  echo -e "${W}║          XHTTP Panel — Management            ║${N}"
-  echo -e "${W}╠══════════════════════════════════════════════╣${N}"
-  printf  "${W}║${N}  ${C}%-10s${N} %s\n" "URL:"   "$PANEL_URL"
-  printf  "${W}║${N}  ${C}%-10s${N} /%s\n" "Path:"  "$WEB_PATH"
-  printf  "${W}║${N}  ${C}%-10s${N} %s\n" "Local:" "$LOCAL_URL"
-  echo -e "${W}╚══════════════════════════════════════════════╝${N}"
+  echo -e "${W}==============================================${N}"
+  echo -e "${W}          XHTTP Panel — Management            ${N}"
+  echo -e "${W}==============================================${N}"
+  if [[ -n "$PANEL_URL" ]]; then
+    printf "  ${C}%-10s${N} %s\n" "URL:" "$PANEL_URL"
+  fi
+  if [[ -n "$WEB_PATH" ]]; then
+    printf "  ${C}%-10s${N} %s\n" "Path:" "/$WEB_PATH"
+  fi
+  if [[ -n "$LOCAL_URL" ]]; then
+    printf "  ${C}%-10s${N} %s\n" "Local:" "$LOCAL_URL"
+  fi
+  if [[ -n "$LOGIN_LINE" ]]; then
+    printf "  ${C}%-10s${N} %s\n" "Login:" "$LOGIN_LINE"
+  fi
+  if [[ "$API_OK" -ne 1 ]]; then
+    echo -e "  ${Y}Local API did not answer. Details above are from the PM2 log.${N}"
+    echo -e "  ${Y}Password reset needs: curl http://127.0.0.1:${PORT}/api/v1/local/info${N}"
+  fi
+  if [[ -z "$WEB_PATH" && -z "$LOCAL_URL" && -z "$PANEL_URL" ]]; then
+    die "No panel details in the local API or in pm2 logs (pm2 logs xhttp-panel)"
+  fi
+  echo -e "${W}==============================================${N}"
   echo ""
 }
 
 do_reset_password() {
+  [[ "$API_OK" -eq 1 ]] || die "Local API is not reachable on port ${PORT}"
   echo -e "${Y}New password (min 6 chars):${N}"
   read -rsp "> " PASS; echo ""
   [[ ${#PASS} -ge 6 ]] || die "Password too short (min 6 chars)"
@@ -54,7 +168,7 @@ do_reset_password() {
   local RES
   RES=$(curl -sf -X POST "$BASE/reset-password" \
     -H "Content-Type: application/json" \
-    -d "{\"password\":$(printf '%s' "$PASS" | python3 -c 'import json,sys; print(json.dumps(sys.stdin.read()))')}" 2>/dev/null)
+    -d "{\"password\":$(json_string "$PASS")}" 2>/dev/null)
 
   echo "$RES" | grep -q '"ok":true' \
     && echo -e "${G}✓ Password changed successfully${N}" \
@@ -72,7 +186,7 @@ do_update() {
   # Download latest release
   local RELEASE_URL
   RELEASE_URL=$(curl -fsSL "https://api.github.com/repos/${REPO}/releases/latest" 2>/dev/null | \
-    grep -oP '"browser_download_url":\s*"\K[^"]+xhttp-panel-release\.tar\.gz' | head -1 || true)
+    sed -n 's/.*"browser_download_url": *"\([^"]*xhttp-panel-release\.tar\.gz\)".*/\1/p' | head -n 1 || true)
 
   if [[ -z "$RELEASE_URL" ]]; then
     die "No release found on GitHub. Check: https://github.com/${REPO}/releases"
@@ -134,6 +248,7 @@ do_update() {
 }
 
 do_set_path() {
+  [[ "$API_OK" -eq 1 ]] || die "Local API is not reachable on port ${PORT}"
   echo -e "${Y}New web path (4–32 chars, a-z 0-9 _ -)${N}"
   read -rp "> " NEW_PATH
 

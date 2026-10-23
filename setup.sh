@@ -157,12 +157,17 @@ server {
     listen 80 default_server;
     server_name _;
 
+    location /api/v1/local/ {
+        return 404;
+    }
+
     location / {
         proxy_pass http://127.0.0.1:${PANEL_PORT};
         proxy_http_version 1.1;
         proxy_set_header Host \$host;
         proxy_set_header X-Real-IP \$remote_addr;
         proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto \$scheme;
         proxy_read_timeout 300s;
     }
 }
@@ -190,8 +195,17 @@ if [[ -n "$PANEL_URL" ]]; then
   echo -e "  ${C}URL:${N}    $PANEL_URL"
   echo -e "  ${C}Path:${N}   /$WEB_PATH"
 fi
-echo -e "  ${C}Local:${N}  http://localhost:${PANEL_PORT}"
-echo -e "  ${C}Login:${N}  admin / admin  ${R}(change immediately!)${N}"
+echo -e "  ${C}Local:${N}  http://127.0.0.1:${PANEL_PORT}"
+PASS_FILE=""
+for f in "$INSTALL_DIR/dist/data/initial-admin-password" "$INSTALL_DIR/data/initial-admin-password"; do
+  [[ -f "$f" ]] && PASS_FILE="$f" && break
+done
+if [[ -n "$PASS_FILE" ]]; then
+  echo -e "  ${C}Login:${N}  admin / $(cat "$PASS_FILE")"
+  echo -e "  ${Y}Change this password after login. The file is removed on first successful login.${N}"
+else
+  echo -e "  ${C}Login:${N}  existing admin account"
+fi
 echo -e "  ${C}CLI:${N}    xhttp-info"
 echo -e "${W}══════════════════════════════════════════════════${N}"
 echo ""

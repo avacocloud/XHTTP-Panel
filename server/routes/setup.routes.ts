@@ -1,7 +1,7 @@
 import { Router } from "express";
 import { requireAuth } from "../middleware/auth.js";
-import { execSync, exec } from "node:child_process";
-import { existsSync, readFileSync, readdirSync, writeFileSync, mkdirSync } from "node:fs";
+import { execSync, exec, spawnSync } from "node:child_process";
+import { existsSync, readFileSync, readdirSync, writeFileSync, mkdirSync, chmodSync } from "node:fs";
 import { randomUUID } from "node:crypto";
 import { readInstallerState } from "../services/xray.service.js";
 
@@ -18,12 +18,15 @@ function run(cmd: string, timeout = 30000): { ok: boolean; output: string } {
 }
 
 function cmdExists(name: string): boolean {
-  try {
-    execSync(`command -v ${name} 2>/dev/null`, { encoding: "utf-8", cwd: "/root" });
-    return true;
-  } catch {
-    return false;
-  }
+  if (!/^[a-zA-Z0-9._-]+$/.test(name)) return false;
+  const result = spawnSync("sh", ["-c", "command -v \"$1\"", "sh", name], { encoding: "utf-8", cwd: "/root" });
+  return result.status === 0;
+}
+
+function sanitizeDomain(domain: string): string | null {
+  const safe = domain.replace(/[^a-zA-Z0-9._-]/g, "");
+  if (!safe || safe.length > 253 || safe.startsWith("-") || safe.includes("..")) return null;
+  return safe;
 }
 
 // ── GET /setup/status — full setup status for all phases ──
@@ -148,10 +151,8 @@ router.get("/status", requireAuth, (_req, res) => {
 
   // Check multiple service names (xray, x-ui, hiddify-xray)
   for (const svc of ["xray", "x-ui", "hiddify-xray"]) {
-    try {
-      const r = execSync(`systemctl is-active ${svc} 2>/dev/null`, { encoding: "utf-8" }).trim();
-      if (r === "active") { xrayRunning = true; xrayServiceName = svc; break; }
-    } catch {}
+    const r = spawnSync("systemctl", ["is-active", svc], { encoding: "utf-8" });
+    if ((r.stdout || "").trim() === "active") { xrayRunning = true; xrayServiceName = svc; break; }
   }
 
   // Also check if xray process is running even without systemd
@@ -164,7 +165,8 @@ router.get("/status", requireAuth, (_req, res) => {
 
   if (xrayRunning) {
     try {
-      const s = execSync(`systemctl show ${xrayServiceName} --property=ActiveEnterTimestamp 2>/dev/null`, { encoding: "utf-8" }).trim();
+      const shown = spawnSync("systemctl", ["show", xrayServiceName, "--property=ActiveEnterTimestamp"], { encoding: "utf-8" });
+      const s = (shown.stdout || "").trim();
       const m = s.match(/ActiveEnterTimestamp=(.+)/);
       if (m) {
         const diff = Date.now() - new Date(m[1]).getTime();
@@ -325,8 +327,8 @@ router.post("/phase3/issue-cert", requireAuth, (req, res) => {
   if (!domain) { res.status(400).json({ error: "Domain is required" }); return; }
   if (certJob.status === "running") { res.json({ success: true, started: true, message: "Already running" }); return; }
 
-  // Sanitize domain
-  const safeDomain = domain.replace(/[^a-zA-Z0-9._-]/g, "");
+  const safeDomain = sanitizeDomain(String(domain));
+  if (!safeDomain) { res.status(400).json({ error: "Invalid domain" }); return; }
 
   // Mark as running and respond IMMEDIATELY (before stopping nginx)
   certJob = { status: "running", output: "" };
@@ -354,8 +356,8 @@ router.post("/phase3/issue-cert", requireAuth, (req, res) => {
     rm -rf /root/.acme.sh/ca 2>/dev/null
     rm -f /root/.acme.sh/account.conf 2>/dev/null
     /root/.acme.sh/acme.sh --set-default-ca --server letsencrypt 2>&1
-    /root/.acme.sh/acme.sh --register-account -m admin@${safeDomain} --server letsencrypt 2>&1
-    /root/.acme.sh/acme.sh --issue -d ${safeDomain} --standalone --keylength ec-256 --listen-v4 --server letsencrypt --force 2>&1
+    /root/.acme.sh/acme.sh --register-account -m "admin@${safeDomain}" --server letsencrypt 2>&1
+    /root/.acme.sh/acme.sh --issue -d "${safeDomain}" --standalone --keylength ec-256 --listen-v4 --server letsencrypt --force 2>&1
     exit $?
   `;
 
@@ -381,7 +383,8 @@ router.post("/phase3/verify-cert", requireAuth, (req, res) => {
   if (!domain) { res.status(400).json({ error: "Domain is required" }); return; }
 
   try {
-    const safeDomain = domain.replace(/[^a-zA-Z0-9._-]/g, "");
+    const safeDomain = sanitizeDomain(String(domain));
+    if (!safeDomain) { res.status(400).json({ error: "Invalid domain" }); return; }
     // Check cert FILE first (Xray might not be running on 443 yet)
     const certPaths = [
       `/root/.acme.sh/${safeDomain}_ecc/fullchain.cer`,
@@ -424,7 +427,8 @@ router.post("/phase4/init-config", requireAuth, (req, res) => {
   const { domain } = req.body;
   if (!domain) { res.status(400).json({ error: "Domain is required" }); return; }
 
-  const safeDomain = domain.replace(/[^a-zA-Z0-9._-]/g, "");
+  const safeDomain = sanitizeDomain(String(domain));
+  if (!safeDomain) { res.status(400).json({ error: "Invalid domain" }); return; }
   const XRAY_CONFIG = process.env.XRAY_CONFIG_PATH || "/usr/local/etc/xray/config.json";
   const CERT_DIR = `/etc/ssl/xhttp/${safeDomain}`;
 
@@ -444,7 +448,8 @@ router.post("/phase4/init-config", requireAuth, (req, res) => {
     mkdirSync(CERT_DIR, { recursive: true });
     run(`cp "${found.cert}" "${CERT_DIR}/fullchain.pem"`);
     run(`cp "${found.key}" "${CERT_DIR}/privkey.pem"`);
-    run(`chmod 644 "${CERT_DIR}/fullchain.pem" "${CERT_DIR}/privkey.pem"`);
+    chmodSync(`${CERT_DIR}/fullchain.pem`, 0o644);
+    chmodSync(`${CERT_DIR}/privkey.pem`, 0o600);
 
     // 3. Generate UUID
     const uuid = randomUUID();
@@ -538,28 +543,31 @@ router.post("/phase4/test-connection", requireAuth, (req, res) => {
   const { domain } = req.body;
   if (!domain) { res.status(400).json({ error: "Domain is required" }); return; }
 
-  // Read port from installer state (default 443)
   const state = readInstallerState();
-  const port = state.CFG_INBOUND_PORT || "443";
-  const path = state.CFG_RELAY_PATH || "/api";
-  const safeDomain = domain.replace(/[^a-zA-Z0-9._-]/g, "");
+  const rawPort = String(state.CFG_INBOUND_PORT || "443");
+  const port = /^\d{1,5}$/.test(rawPort) ? rawPort : "443";
+  const rawPath = String(state.CFG_RELAY_PATH || "/api");
+  const path = /^\/[A-Za-z0-9._~/-]{0,200}$/.test(rawPath) ? rawPath : "/api";
+  const safeDomain = sanitizeDomain(String(domain));
+  if (!safeDomain) { res.status(400).json({ error: "Invalid domain" }); return; }
 
-  // Use -k (insecure) to accept self-signed certs, and hit the actual xray port + relay path
   const portSuffix = port === "443" ? "" : `:${port}`;
   const testUrl = `https://${safeDomain}${portSuffix}${path}`;
 
   try {
-    const result = run(
-      `curl -sk -o /dev/null -w '%{http_code}|%{time_total}' --max-time 10 "${testUrl}" 2>&1`
+    const result = spawnSync(
+      "curl",
+      ["-sk", "-o", "/dev/null", "-w", "%{http_code}|%{time_total}", "--max-time", "10", testUrl],
+      { encoding: "utf-8", timeout: 15000 }
     );
-    if (result.ok) {
-      const parts = result.output.trim().split("|");
+    const output = (result.stdout || "").trim();
+    if (result.status === 0 && output) {
+      const parts = output.split("|");
       const code = Number(parts[0]) || 0;
       const time = parseFloat(parts[1]) || 0;
-      // 4xx from xray = relay is alive (rejects invalid handshake), 2xx = also fine
       res.json({ success: code > 0 && code < 500, statusCode: code, responseTime: time, url: testUrl });
     } else {
-      res.json({ success: false, output: result.output, url: testUrl });
+      res.json({ success: false, output: result.stderr || output || "connection failed", url: testUrl });
     }
   } catch (err: any) {
     res.status(500).json({ error: err.message });

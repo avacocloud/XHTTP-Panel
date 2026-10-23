@@ -1,9 +1,18 @@
 import { getDb } from "../db/init.js";
 import { readFileSync, existsSync, writeFileSync, copyFileSync } from "node:fs";
-import { execSync } from "node:child_process";
+import { spawnSync } from "node:child_process";
 
 const XRAY_CONFIG = process.env.XRAY_CONFIG_PATH || "/usr/local/etc/xray/config.json";
 const XRAY_API_PORT = Number(process.env.XRAY_API_PORT) || 10085;
+
+function runCommand(cmd: string, args: string[], input?: string, timeout = 10000): { status: number | null; output: string; error: string } {
+  const result = spawnSync(cmd, args, { input, encoding: "utf-8", timeout, cwd: "/root" });
+  return {
+    status: result.status,
+    output: result.stdout || "",
+    error: result.stderr || result.error?.message || "",
+  };
+}
 
 // ── Types ────────────────────────────────────────────────────────────────────
 
@@ -68,25 +77,15 @@ function writeConfig(config: Record<string, any>): void {
 }
 
 function validateConfig(): { valid: boolean; error?: string } {
-  try {
-    execSync(`xray -test -config "${XRAY_CONFIG}" 2>&1`, {
-      encoding: "utf-8",
-      timeout: 10000,
-      cwd: "/root",
-    });
-    return { valid: true };
-  } catch (err: any) {
-    return { valid: false, error: (err.stderr || err.stdout || String(err)).slice(0, 300) };
-  }
+  const result = runCommand("xray", ["-test", "-config", XRAY_CONFIG]);
+  if (result.status === 0) return { valid: true };
+  return { valid: false, error: (result.error || result.output).slice(0, 300) };
 }
 
 function restartXray(): { success: boolean; message: string } {
-  try {
-    execSync("systemctl restart xray 2>&1", { encoding: "utf-8" });
-    return { success: true, message: "Xray restarted" };
-  } catch (err) {
-    return { success: false, message: String(err) };
-  }
+  const result = runCommand("systemctl", ["restart", "xray"], undefined, 20000);
+  if (result.status === 0) return { success: true, message: "Xray restarted" };
+  return { success: false, message: result.error || result.output || "restart failed" };
 }
 
 // Write config to disk only (persist for next Xray start) — NO restart
@@ -118,11 +117,8 @@ function xrayAddClientRuntime(inboundTag: string, uuid: string, email: string, f
       inboundTag,
       user: { email, level: 0, account: { id: uuid, flow: flow || "" } }
     });
-    execSync(
-      `echo '${input.replace(/'/g, "\\'")}' | xray api adi --server=127.0.0.1:${XRAY_API_PORT} 2>/dev/null`,
-      { encoding: "utf-8", timeout: 5000 }
-    );
-    return true;
+    const result = runCommand("xray", ["api", "adi", `--server=127.0.0.1:${XRAY_API_PORT}`], input, 5000);
+    return result.status === 0;
   } catch {
     return false;
   }
@@ -131,11 +127,8 @@ function xrayAddClientRuntime(inboundTag: string, uuid: string, email: string, f
 function xrayRemoveClientRuntime(inboundTag: string, email: string): boolean {
   try {
     const input = JSON.stringify({ inboundTag, email });
-    execSync(
-      `echo '${input.replace(/'/g, "\\'")}' | xray api rmi --server=127.0.0.1:${XRAY_API_PORT} 2>/dev/null`,
-      { encoding: "utf-8", timeout: 5000 }
-    );
-    return true;
+    const result = runCommand("xray", ["api", "rmi", `--server=127.0.0.1:${XRAY_API_PORT}`], input, 5000);
+    return result.status === 0;
   } catch {
     return false;
   }
@@ -256,11 +249,9 @@ function updateClientInXrayConfig(
 
 function queryXrayStats(): TrafficStats[] {
   try {
-    const output = execSync(
-      `xray api statsquery --server=127.0.0.1:${XRAY_API_PORT} 2>/dev/null`,
-      { encoding: "utf-8", timeout: 5000 }
-    );
-    return parseStatsOutput(output);
+    const result = runCommand("xray", ["api", "statsquery", `--server=127.0.0.1:${XRAY_API_PORT}`], undefined, 5000);
+    if (!result.output) return [];
+    return parseStatsOutput(result.output);
   } catch {
     return [];
   }
@@ -311,11 +302,13 @@ function parseStatsOutput(output: string): TrafficStats[] {
 
 function resetXrayUserStats(email: string): boolean {
   try {
-    execSync(
-      `xray api statsquery --server=127.0.0.1:${XRAY_API_PORT} -reset -pattern "user>>>${email}>>>" 2>/dev/null`,
-      { encoding: "utf-8", timeout: 5000 }
+    const result = runCommand(
+      "xray",
+      ["api", "statsquery", `--server=127.0.0.1:${XRAY_API_PORT}`, "-reset", "-pattern", `user>>>${email}>>>`],
+      undefined,
+      5000
     );
-    return true;
+    return result.status === 0;
   } catch {
     return false;
   }

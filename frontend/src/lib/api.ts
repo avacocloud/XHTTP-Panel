@@ -2,6 +2,7 @@ import axios from "axios";
 
 const api = axios.create({
   baseURL: process.env.NEXT_PUBLIC_API_URL || "/api/v1",
+  withCredentials: true,
 });
 
 api.interceptors.request.use((config) => {
@@ -25,7 +26,8 @@ api.interceptors.response.use(
         try {
           const { data } = await axios.post(
             `${api.defaults.baseURL}/auth/refresh`,
-            { refreshToken }
+            { refreshToken },
+            { withCredentials: true }
           );
           localStorage.setItem("accessToken", data.accessToken);
           localStorage.setItem("refreshToken", data.refreshToken);
